@@ -1,0 +1,120 @@
+version: 2
+defaults: &defaults
+  working_directory: ~/repo
+node: &node
+  <<: *defaults
+  docker:
+    - image: node:10.13.0
+
+gcloud: &gcloud
+  <<: *defaults
+  docker:
+    - image: google/cloud-sdk
+
+jobs:
+  setup:
+    <<: *node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Install dependencies
+          command: npm install
+      - save_cache:
+          key: app-dependencies-{{ checksum "package-lock.json" }}
+          paths:
+            - node_modules
+  clean:
+    <<: *node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Remove Typescript generated files
+          command: npm run clean
+  lint:
+    <<: *node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Check lint
+          command: npm run lint
+  build:
+    <<: *node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Build the project
+          command: npm run build
+      - save_cache:
+          key: app-build-artifacts-{{ .Environment.CIRCLE_BRANCH }}-{{ .Environment.CIRCLE_SHA1 }}
+          paths:
+            - functions
+  test:
+    <<: *node
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-build-artifacts-{{ .Environment.CIRCLE_BRANCH }}-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Test
+          command: npm run test
+  deploy:
+    <<: *gcloud
+    steps:
+      - checkout
+      - restore_cache:
+          keys:
+            - app-build-artifacts-{{ .Environment.CIRCLE_BRANCH }}-{{ .Environment.CIRCLE_SHA1 }}
+      - restore_cache:
+          keys:
+            - app-dependencies-{{ checksum "package-lock.json" }}
+            - app-dependencies-
+      - run:
+          name: Store Service Account
+          command: echo $GCLOUD_SERVICE_KEY | base64 --decode --ignore-garbage > ${HOME}/gcloud-service-key.json
+      - run: |
+          gcloud auth activate-service-account --key-file=${HOME}/gcloud-service-key.json
+          gcloud --quiet config set project $GOOGLE_CLOUD_PROJECT_ID
+          gcloud --quiet config set functions/region $GOOGLE_COMPUTE_REGION
+      - run:
+          name: Deploy functions to GCP
+          command: |
+            gcloud functions deploy serverless-function-name --source=functions/src --entry-point helloWorld --runtime nodejs10 --memory 128 --timeout 540 --trigger-http 
+workflows:
+  version: 2
+  lint_build_test_build_deploy:
+    jobs:
+      - setup
+      - lint:
+          requires:
+            - setup
+      - build:
+          requires:
+            - setup
+      - test:
+          requires:
+            - build
+            - lint
+      - deploy:
+          requires:
+            - test
